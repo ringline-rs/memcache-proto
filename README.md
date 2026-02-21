@@ -14,10 +14,10 @@ A standalone, zero-copy protocol implementation with no runtime dependencies.
 
 ```toml
 [dependencies]
-memcache-proto = "0.1"
+memcache-proto = "0.0.1"
 
 # With binary protocol support:
-memcache-proto = { version = "0.1", features = ["full"] }
+memcache-proto = { version = "0.0.1", features = ["full"] }
 ```
 
 ## License
