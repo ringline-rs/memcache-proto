@@ -1,0 +1,1 @@
+rd_("nmemcache_proto")

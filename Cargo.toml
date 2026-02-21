@@ -1,0 +1,21 @@
+[package]
+name = "memcache-proto"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ringline-rs/memcache-proto"
+description = "Memcache ASCII and binary protocol parser and encoder"
+readme = "README.md"
+keywords = ["memcache", "memcached", "protocol", "parser"]
+categories = ["network-programming", "parsing"]
+
+[features]
+default = ["ascii"]
+ascii = []
+binary = []
+full = ["ascii", "binary"]
+
+[dependencies]
+memchr = "2"
+itoa = "1"
+thiserror = "2"
