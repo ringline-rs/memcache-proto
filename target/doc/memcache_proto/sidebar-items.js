@@ -1,1 +1,0 @@
-window.SIDEBAR_ITEMS = {"constant":["DEFAULT_MAX_KEYS","DEFAULT_MAX_KEY_LEN","DEFAULT_MAX_VALUE_LEN","STREAMING_THRESHOLD"],"enum":["Command","ParseError","ParseProgress","Request","Response"],"fn":["complete_set","parse_streaming"],"mod":["binary"],"struct":["AddRequest","ParseOptions","ReplaceRequest","SetHeader","Value"]};
