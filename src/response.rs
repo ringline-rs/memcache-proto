@@ -11,6 +11,7 @@
 //! - `SERVER_ERROR <msg>\r\n` - Server error
 
 use crate::error::ParseError;
+use bytes::Bytes;
 use std::io::Write;
 
 /// A single value from a GET response.
@@ -500,6 +501,204 @@ fn parse_value_response(data: &[u8]) -> Result<(Response, usize), ParseError> {
     }
 
     Ok((Response::Values(values), pos))
+}
+
+// ========================================================================
+// Zero-copy Bytes-based types and parsing
+// ========================================================================
+
+/// A single value from a GET response, using zero-copy `Bytes` references.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValueBytes {
+    pub key: Bytes,
+    pub flags: u32,
+    pub data: Bytes,
+    /// CAS unique token, present when the response is from a `gets` command.
+    pub cas: Option<u64>,
+}
+
+/// A parsed Memcache response using zero-copy `Bytes` for string fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponseBytes {
+    /// Value response from GET (may contain multiple values for multi-get)
+    Values(Vec<ValueBytes>),
+    /// STORED response from SET
+    Stored,
+    /// NOT_STORED response from SET
+    NotStored,
+    /// DELETED response from DELETE
+    Deleted,
+    /// NOT_FOUND response from DELETE
+    NotFound,
+    /// EXISTS response from CAS
+    Exists,
+    /// OK response (from flush_all, touch, etc.)
+    Ok,
+    /// Numeric response from INCR/DECR (the new value after the operation).
+    Numeric(u64),
+    /// VERSION response
+    Version(Bytes),
+    /// Generic error
+    Error,
+    /// Client error with message
+    ClientError(Bytes),
+    /// Server error with message
+    ServerError(Bytes),
+}
+
+impl ResponseBytes {
+    /// Returns true if this is an error response.
+    #[inline]
+    pub fn is_error(&self) -> bool {
+        matches!(
+            self,
+            ResponseBytes::Error | ResponseBytes::ClientError(_) | ResponseBytes::ServerError(_)
+        )
+    }
+
+    /// Returns true if this represents a cache miss.
+    #[inline]
+    pub fn is_miss(&self) -> bool {
+        match self {
+            ResponseBytes::Values(values) => values.is_empty(),
+            ResponseBytes::NotFound => true,
+            _ => false,
+        }
+    }
+
+    /// Returns true if this is a successful storage response.
+    #[inline]
+    pub fn is_stored(&self) -> bool {
+        matches!(self, ResponseBytes::Stored)
+    }
+
+    /// Parse a response from a `Bytes` buffer, returning zero-copy slices.
+    ///
+    /// Same parsing logic as [`Response::parse`] but returns `Bytes::slice()`
+    /// references into the input buffer instead of copying into `Vec<u8>`.
+    #[inline]
+    pub fn parse(data: Bytes) -> Result<(Self, usize), ParseError> {
+        let line_end = find_crlf(&data).ok_or(ParseError::Incomplete)?;
+        let line = &data[..line_end];
+
+        if line == b"STORED" {
+            return Ok((ResponseBytes::Stored, line_end + 2));
+        }
+        if line == b"NOT_STORED" {
+            return Ok((ResponseBytes::NotStored, line_end + 2));
+        }
+        if line == b"DELETED" {
+            return Ok((ResponseBytes::Deleted, line_end + 2));
+        }
+        if line == b"NOT_FOUND" {
+            return Ok((ResponseBytes::NotFound, line_end + 2));
+        }
+        if line == b"EXISTS" {
+            return Ok((ResponseBytes::Exists, line_end + 2));
+        }
+        if line == b"END" {
+            return Ok((ResponseBytes::Values(vec![]), line_end + 2));
+        }
+        if line == b"OK" {
+            return Ok((ResponseBytes::Ok, line_end + 2));
+        }
+        if line == b"ERROR" {
+            return Ok((ResponseBytes::Error, line_end + 2));
+        }
+        if line.starts_with(b"CLIENT_ERROR ") {
+            let msg = data.slice(13..line_end);
+            return Ok((ResponseBytes::ClientError(msg), line_end + 2));
+        }
+        if line.starts_with(b"SERVER_ERROR ") {
+            let msg = data.slice(13..line_end);
+            return Ok((ResponseBytes::ServerError(msg), line_end + 2));
+        }
+        if line.starts_with(b"VERSION ") {
+            let version = data.slice(8..line_end);
+            return Ok((ResponseBytes::Version(version), line_end + 2));
+        }
+
+        if line.starts_with(b"VALUE ") {
+            return parse_value_response_bytes(&data);
+        }
+
+        if !line.is_empty() && line.iter().all(|&b| b.is_ascii_digit()) {
+            let value = parse_u64(line)?;
+            return Ok((ResponseBytes::Numeric(value), line_end + 2));
+        }
+
+        Err(ParseError::Protocol("unknown response"))
+    }
+}
+
+/// Parse a VALUE response producing zero-copy `ValueBytes` with `Bytes::slice()`.
+fn parse_value_response_bytes(data: &Bytes) -> Result<(ResponseBytes, usize), ParseError> {
+    let mut values = Vec::new();
+    let mut pos = 0;
+
+    loop {
+        let remaining = &data[pos..];
+        let line_end = find_crlf(remaining).ok_or(ParseError::Incomplete)?;
+        let line = &remaining[..line_end];
+
+        if line == b"END" {
+            pos += line_end + 2;
+            break;
+        }
+
+        if !line.starts_with(b"VALUE ") {
+            return Err(ParseError::Protocol("expected VALUE or END"));
+        }
+
+        // Parse: VALUE <key> <flags> <bytes> [<cas>]
+        // We need absolute offsets into `data` for Bytes::slice().
+        let header_start = pos + 6; // skip "VALUE "
+        let header_end = pos + line_end;
+        let header = &data[header_start..header_end];
+
+        let parts: Vec<&[u8]> = header.split(|&b| b == b' ').collect();
+        if parts.len() < 3 {
+            return Err(ParseError::Protocol("invalid VALUE line"));
+        }
+
+        // Compute absolute offset of the key within `data`.
+        let key_start = header_start;
+        let key_end = key_start + parts[0].len();
+        let key = data.slice(key_start..key_end);
+
+        let flags = parse_u32(parts[1])?;
+        let bytes = parse_usize(parts[2])?;
+        let cas = if parts.len() >= 4 {
+            Some(parse_u64(parts[3])?)
+        } else {
+            None
+        };
+
+        // Move past the VALUE line
+        pos += line_end + 2;
+
+        // Read the data
+        let data_end = pos + bytes;
+        if data.len() < data_end + 2 {
+            return Err(ParseError::Incomplete);
+        }
+
+        if data[data_end] != b'\r' || data[data_end + 1] != b'\n' {
+            return Err(ParseError::Protocol("missing data terminator"));
+        }
+
+        let value_data = data.slice(pos..data_end);
+        pos = data_end + 2;
+
+        values.push(ValueBytes {
+            key,
+            flags,
+            data: value_data,
+            cas,
+        });
+    }
+
+    Ok((ResponseBytes::Values(values), pos))
 }
 
 /// Encode multiple values as a response.
@@ -1200,5 +1399,216 @@ mod tests {
             }
             _ => panic!("expected Values"),
         }
+    }
+
+    // ── ResponseBytes / parse_bytes tests ──────────────────────────────
+
+    #[test]
+    fn test_parse_bytes_stored() {
+        let data = Bytes::from_static(b"STORED\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(resp, ResponseBytes::Stored);
+        assert_eq!(consumed, 8);
+    }
+
+    #[test]
+    fn test_parse_bytes_not_stored() {
+        let data = Bytes::from_static(b"NOT_STORED\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(resp, ResponseBytes::NotStored);
+        assert_eq!(consumed, 12);
+    }
+
+    #[test]
+    fn test_parse_bytes_deleted() {
+        let data = Bytes::from_static(b"DELETED\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(resp, ResponseBytes::Deleted);
+        assert_eq!(consumed, 9);
+    }
+
+    #[test]
+    fn test_parse_bytes_not_found() {
+        let data = Bytes::from_static(b"NOT_FOUND\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(resp, ResponseBytes::NotFound);
+        assert_eq!(consumed, 11);
+    }
+
+    #[test]
+    fn test_parse_bytes_exists() {
+        let data = Bytes::from_static(b"EXISTS\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(resp, ResponseBytes::Exists);
+        assert_eq!(consumed, 8);
+    }
+
+    #[test]
+    fn test_parse_bytes_end() {
+        let data = Bytes::from_static(b"END\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(resp, ResponseBytes::Values(vec![]));
+        assert_eq!(consumed, 5);
+        assert!(resp.is_miss());
+    }
+
+    #[test]
+    fn test_parse_bytes_ok() {
+        let data = Bytes::from_static(b"OK\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(resp, ResponseBytes::Ok);
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn test_parse_bytes_error() {
+        let data = Bytes::from_static(b"ERROR\r\n");
+        let (resp, _) = ResponseBytes::parse(data).unwrap();
+        assert!(resp.is_error());
+    }
+
+    #[test]
+    fn test_parse_bytes_numeric() {
+        let data = Bytes::from_static(b"42\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(resp, ResponseBytes::Numeric(42));
+        assert_eq!(consumed, 4);
+    }
+
+    #[test]
+    fn test_parse_bytes_client_error() {
+        let data = Bytes::from_static(b"CLIENT_ERROR bad request\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert!(resp.is_error());
+        assert_eq!(consumed, 26);
+        match resp {
+            ResponseBytes::ClientError(msg) => assert_eq!(&msg[..], b"bad request"),
+            _ => panic!("expected ClientError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_server_error() {
+        let data = Bytes::from_static(b"SERVER_ERROR out of memory\r\n");
+        let (resp, _) = ResponseBytes::parse(data).unwrap();
+        assert!(resp.is_error());
+        match resp {
+            ResponseBytes::ServerError(msg) => assert_eq!(&msg[..], b"out of memory"),
+            _ => panic!("expected ServerError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_version() {
+        let data = Bytes::from_static(b"VERSION 1.6.9\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(consumed, 15);
+        match resp {
+            ResponseBytes::Version(v) => assert_eq!(&v[..], b"1.6.9"),
+            _ => panic!("expected Version"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_value() {
+        let data = Bytes::from_static(b"VALUE mykey 0 7\r\nmyvalue\r\nEND\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(consumed, 31);
+        match resp {
+            ResponseBytes::Values(values) => {
+                assert_eq!(values.len(), 1);
+                assert_eq!(&values[0].key[..], b"mykey");
+                assert_eq!(values[0].flags, 0);
+                assert_eq!(&values[0].data[..], b"myvalue");
+                assert_eq!(values[0].cas, None);
+            }
+            _ => panic!("expected Values"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_multi_value() {
+        let raw = b"VALUE key1 0 3\r\nfoo\r\nVALUE key2 0 3\r\nbar\r\nEND\r\n";
+        let data = Bytes::from_static(raw);
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(consumed, raw.len());
+        match resp {
+            ResponseBytes::Values(values) => {
+                assert_eq!(values.len(), 2);
+                assert_eq!(&values[0].key[..], b"key1");
+                assert_eq!(&values[0].data[..], b"foo");
+                assert_eq!(&values[1].key[..], b"key2");
+                assert_eq!(&values[1].data[..], b"bar");
+            }
+            _ => panic!("expected Values"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_value_with_cas() {
+        let data = Bytes::from_static(b"VALUE mykey 0 5 12345\r\nhello\r\nEND\r\n");
+        let (resp, consumed) = ResponseBytes::parse(data).unwrap();
+        assert_eq!(consumed, 35);
+        match resp {
+            ResponseBytes::Values(values) => {
+                assert_eq!(values.len(), 1);
+                assert_eq!(&values[0].key[..], b"mykey");
+                assert_eq!(&values[0].data[..], b"hello");
+                assert_eq!(values[0].cas, Some(12345));
+            }
+            _ => panic!("expected Values"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_value_with_flags() {
+        let data = Bytes::from_static(b"VALUE mykey 12345 5\r\nhello\r\nEND\r\n");
+        let (resp, _) = ResponseBytes::parse(data).unwrap();
+        match resp {
+            ResponseBytes::Values(values) => {
+                assert_eq!(values[0].flags, 12345);
+            }
+            _ => panic!("expected Values"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_incomplete() {
+        let data = Bytes::from_static(b"VALUE mykey 0 7\r\nmyval");
+        assert!(matches!(
+            ResponseBytes::parse(data),
+            Err(ParseError::Incomplete)
+        ));
+    }
+
+    #[test]
+    fn test_parse_bytes_unknown() {
+        let data = Bytes::from_static(b"UNKNOWN\r\n");
+        assert!(matches!(
+            ResponseBytes::parse(data),
+            Err(ParseError::Protocol("unknown response"))
+        ));
+    }
+
+    #[test]
+    fn test_parse_bytes_zero_copy_slices() {
+        // Verify that parsed Bytes share the same backing allocation
+        let raw = b"VALUE mykey 0 7\r\nmyvalue\r\nEND\r\n";
+        let data = Bytes::copy_from_slice(raw);
+        let (resp, _) = ResponseBytes::parse(data.clone()).unwrap();
+        match resp {
+            ResponseBytes::Values(values) => {
+                // The key and data should be slices into the original Bytes
+                assert_eq!(&values[0].key[..], b"mykey");
+                assert_eq!(&values[0].data[..], b"myvalue");
+            }
+            _ => panic!("expected Values"),
+        }
+    }
+
+    #[test]
+    fn test_parse_bytes_is_stored() {
+        assert!(ResponseBytes::Stored.is_stored());
+        assert!(!ResponseBytes::NotStored.is_stored());
     }
 }

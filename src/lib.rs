@@ -76,6 +76,6 @@ pub use error::ParseError;
 #[cfg(feature = "ascii")]
 pub use request::{AddRequest, ReplaceRequest, Request};
 #[cfg(feature = "ascii")]
-pub use response::{Response, Value};
+pub use response::{Response, ResponseBytes, Value, ValueBytes};
 #[cfg(feature = "ascii")]
 pub use streaming::{ParseProgress, STREAMING_THRESHOLD, SetHeader, complete_set, parse_streaming};

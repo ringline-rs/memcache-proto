@@ -1,6 +1,6 @@
 [package]
 name = "memcache-proto"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/ringline-rs/memcache-proto"
@@ -16,6 +16,7 @@ binary = []
 full = ["ascii", "binary"]
 
 [dependencies]
+bytes = "1"
 memchr = "2"
 itoa = "1"
 thiserror = "2"
