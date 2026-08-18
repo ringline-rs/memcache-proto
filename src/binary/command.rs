@@ -128,7 +128,7 @@ impl<'a> BinaryCommand<'a> {
 
         // Validate scalar body lengths before deciding whether more bytes are needed.
         header
-            .value_length()
+            .checked_value_length()
             .ok_or(ParseError::Protocol("header lengths exceed body length"))?;
 
         let total_len = header
