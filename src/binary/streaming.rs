@@ -126,7 +126,14 @@ pub fn parse_streaming(
     // Parse the request header
     let header = RequestHeader::parse(buffer)?;
 
-    let total_len = HEADER_SIZE + header.total_body_length as usize;
+    // Validate the scalar body lengths before deciding whether more bytes are needed.
+    let value_len = header
+        .value_length()
+        .ok_or(ParseError::Protocol("header lengths exceed body length"))?;
+
+    let total_len = header
+        .packet_length()
+        .ok_or(ParseError::Protocol("packet length overflow"))?;
 
     // Check if this is a storage command with a value
     let is_storage_command = matches!(
@@ -158,14 +165,6 @@ pub fn parse_streaming(
     // For storage commands, we need extras and key to determine if streaming
     let extras_len = header.extras_length as usize;
     let key_len = header.key_length as usize;
-
-    // Validate header lengths
-    if extras_len + key_len > header.total_body_length as usize {
-        return Err(ParseError::Protocol("header lengths exceed body length"));
-    }
-
-    // Calculate value length
-    let value_len = header.total_body_length as usize - extras_len - key_len;
 
     // Check if we should use streaming
     if value_len < streaming_threshold {
@@ -773,6 +772,20 @@ mod tests {
             }
             _ => panic!("expected Complete"),
         }
+    }
+
+    #[test]
+    fn malformed_non_storage_header_is_rejected_before_waiting_for_body() {
+        let mut data = [0_u8; HEADER_SIZE];
+        let mut header = RequestHeader::new(Opcode::Get);
+        header.key_length = 2;
+        header.total_body_length = 1;
+        header.encode(&mut data);
+
+        assert!(matches!(
+            parse_streaming(&data, BINARY_STREAMING_THRESHOLD),
+            Err(ParseError::Protocol("header lengths exceed body length"))
+        ));
     }
 
     #[test]
