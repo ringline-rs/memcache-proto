@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `DEFAULT_MAX_RESPONSE_LINE_LEN`, plus `Response::parse_with_max_line_len` and
+  `ResponseBytes::parse_with_max_line_len` for callers that need a different bound.
+
+### Fixed
+
+- ASCII response parsing is now bounded by a maximum line length, matching the
+  command and streaming parsers. `Response::parse` and `ResponseBytes::parse`
+  previously reported `Incomplete` for an unterminated line no matter how large
+  the buffer grew, so a peer that never sent a newline could make a caller
+  buffer without limit. Both now return `Protocol("line too long")` past
+  `DEFAULT_MAX_RESPONSE_LINE_LEN` (8 KiB).
+
 ## [0.0.3] - 2026-08-19
 
 ### Added
