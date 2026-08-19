@@ -830,7 +830,6 @@ mod tests {
         // Set key_length larger than total_body_length
         data[2] = 0xFF;
         data[3] = 0xFF;
-        data.truncate(HEADER_SIZE);
         assert!(matches!(
             BinaryCommand::parse(&data),
             Err(ParseError::Protocol("header lengths exceed body length"))

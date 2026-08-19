@@ -93,6 +93,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --all --release
 
+  wasm32-wasip1:
+    name: Check (wasm32-wasip1, binary)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --target wasm32-wasip1 --no-default-features --features binary
+
   kani:
     name: Kani (binary headers)
     runs-on: ubuntu-latest

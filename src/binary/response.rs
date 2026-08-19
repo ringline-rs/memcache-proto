@@ -756,14 +756,14 @@ mod tests {
     #[test]
     fn test_parse_header_lengths_exceed_body() {
         let mut buf = [0u8; 256];
-        BinaryResponse::encode_get(&mut buf, Opcode::Get, 42, 123, 0, b"hello");
+        let len = BinaryResponse::encode_get(&mut buf, Opcode::Get, 42, 123, 0, b"hello");
 
         // Set key_length larger than total_body_length
         buf[2] = 0xFF;
         buf[3] = 0xFF;
 
         assert!(matches!(
-            ParsedBinaryResponse::parse(&buf[..HEADER_SIZE]),
+            ParsedBinaryResponse::parse(&buf[..len]),
             Err(crate::error::ParseError::Protocol(
                 "header lengths exceed body length"
             ))
