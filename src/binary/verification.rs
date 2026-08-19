@@ -56,7 +56,7 @@ fn request_checked_lengths_are_total_and_decompose_body() {
         header.total_body_length,
         header.extras_length,
         header.key_length,
-        header.checked_value_length(),
+        header.value_length(),
         header.packet_length(),
     );
 }
@@ -72,7 +72,7 @@ fn response_checked_lengths_are_total_and_decompose_body() {
         header.total_body_length,
         header.extras_length,
         header.key_length,
-        header.checked_value_length(),
+        header.value_length(),
         header.packet_length(),
     );
 }
@@ -88,7 +88,7 @@ fn malformed_request_lengths_are_rejected_without_wrapping() {
             > u64::from(header.total_body_length),
     );
 
-    assert_eq!(header.checked_value_length(), None);
+    assert_eq!(header.value_length(), None);
 }
 
 #[kani::proof]
@@ -102,7 +102,7 @@ fn malformed_response_lengths_are_rejected_without_wrapping() {
             > u64::from(header.total_body_length),
     );
 
-    assert_eq!(header.checked_value_length(), None);
+    assert_eq!(header.value_length(), None);
 }
 
 fn check_lengths(

@@ -645,9 +645,9 @@ impl<'a> Command<'a> {
 /// - `Ok(None)` if no CRLF found yet (need more data)
 /// - `Err(ParseError::Protocol)` if buffer exceeds max_line_len without CRLF
 fn find_crlf(buffer: &[u8], max_line_len: usize) -> Result<Option<usize>, ParseError> {
-    if let Some(pos) = memchr::memchr(b'\r', buffer)
-        .filter(|&pos| pos + 1 < buffer.len() && buffer[pos + 1] == b'\n')
-    {
+    // A bare `\r` not followed by `\n` is ordinary line content, so scan for a
+    // real CRLF rather than inspecting only the first `\r`.
+    if let Some(pos) = memchr::memmem::find(buffer, b"\r\n") {
         return Ok(Some(pos));
     }
 
@@ -1005,6 +1005,28 @@ mod tests {
             Command::parse(b"get mykey\r"),
             Err(ParseError::Incomplete)
         ));
+    }
+
+    #[test]
+    fn find_crlf_skips_bare_cr() {
+        const MAX: usize = 1024;
+        assert_eq!(find_crlf(b"a\rb\r\n", MAX), Ok(Some(3)));
+        assert_eq!(find_crlf(b"\r\n", MAX), Ok(Some(0)));
+        assert_eq!(find_crlf(b"a\rb", MAX), Ok(None));
+        // The line-length guard still applies when no CRLF is present.
+        assert!(matches!(
+            find_crlf(b"aaaaa\rbbbbb", 4),
+            Err(ParseError::Protocol("line too long"))
+        ));
+    }
+
+    #[test]
+    fn bare_cr_in_line_does_not_stall_parser() {
+        // Regression: a complete CRLF-terminated line containing a bare \r
+        // used to report Incomplete until the line-length guard tripped.
+        let (cmd, consumed) = Command::parse(b"get my\rkey\r\n").expect("complete line parses");
+        assert_eq!(consumed, 12);
+        assert!(matches!(cmd, Command::Get { key } if key == b"my\rkey"));
     }
 
     #[test]

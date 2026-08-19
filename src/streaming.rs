@@ -251,9 +251,9 @@ pub fn complete_set<'a>(header: &SetHeader<'_>, value: &'a [u8]) -> Command<'a> 
 
 /// Find \r\n in buffer, return position of \r.
 fn find_crlf(buffer: &[u8], max_line_len: usize) -> Result<Option<usize>, ParseError> {
-    if let Some(pos) = memchr::memchr(b'\r', buffer)
-        .filter(|&pos| pos + 1 < buffer.len() && buffer[pos + 1] == b'\n')
-    {
+    // A bare `\r` not followed by `\n` is ordinary line content, so scan for a
+    // real CRLF rather than inspecting only the first `\r`.
+    if let Some(pos) = memchr::memmem::find(buffer, b"\r\n") {
         return Ok(Some(pos));
     }
 
@@ -284,6 +284,19 @@ fn parse_usize(data: &[u8]) -> Result<usize, ParseError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_crlf_skips_bare_cr() {
+        const MAX: usize = 1024;
+        assert_eq!(find_crlf(b"a\rb\r\n", MAX), Ok(Some(3)));
+        assert_eq!(find_crlf(b"\r\n", MAX), Ok(Some(0)));
+        assert_eq!(find_crlf(b"a\rb", MAX), Ok(None));
+        // The line-length guard still applies when no CRLF is present.
+        assert!(matches!(
+            find_crlf(b"aaaaa\rbbbbb", 4),
+            Err(ParseError::Protocol("line too long"))
+        ));
+    }
 
     #[test]
     fn test_small_set_complete() {

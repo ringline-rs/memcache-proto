@@ -312,20 +312,8 @@ impl RequestHeader {
         HEADER_SIZE
     }
 
-    /// Calculate the value length from a valid header.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the declared extras and key do not fit in the declared
-    /// total body length. Use [`Self::checked_value_length`] for untrusted
-    /// header fields.
-    pub fn value_length(&self) -> usize {
-        self.checked_value_length()
-            .expect("invalid binary request header lengths")
-    }
-
     /// Calculate the value length, returning `None` for inconsistent fields.
-    pub fn checked_value_length(&self) -> Option<usize> {
+    pub fn value_length(&self) -> Option<usize> {
         checked_value_length(self.total_body_length, self.extras_length, self.key_length)
     }
 
@@ -420,20 +408,8 @@ impl ResponseHeader {
         HEADER_SIZE
     }
 
-    /// Calculate the value length from a valid header.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the declared extras and key do not fit in the declared
-    /// total body length. Use [`Self::checked_value_length`] for untrusted
-    /// header fields.
-    pub fn value_length(&self) -> usize {
-        self.checked_value_length()
-            .expect("invalid binary response header lengths")
-    }
-
     /// Calculate the value length, returning `None` for inconsistent fields.
-    pub fn checked_value_length(&self) -> Option<usize> {
+    pub fn value_length(&self) -> Option<usize> {
         checked_value_length(self.total_body_length, self.extras_length, self.key_length)
     }
 
@@ -530,28 +506,17 @@ mod tests {
         header.extras_length = 8;
         header.key_length = 10;
         header.total_body_length = 28; // 8 + 10 + 10 value
-        assert_eq!(header.value_length(), 10);
+        assert_eq!(header.value_length(), Some(10));
     }
 
     #[test]
-    fn request_checked_value_length_rejects_malformed_lengths() {
+    fn request_value_length_rejects_malformed_lengths() {
         let mut header = RequestHeader::new(Opcode::Set);
         header.extras_length = 8;
         header.key_length = 1;
         header.total_body_length = 0;
 
-        assert_eq!(header.checked_value_length(), None);
-    }
-
-    #[test]
-    #[should_panic(expected = "invalid binary request header lengths")]
-    fn request_legacy_value_length_preserves_malformed_header_panic() {
-        let mut header = RequestHeader::new(Opcode::Set);
-        header.extras_length = 8;
-        header.key_length = 1;
-        header.total_body_length = 0;
-
-        let _ = header.value_length();
+        assert_eq!(header.value_length(), None);
     }
 
     // Additional tests for improved coverage
@@ -763,28 +728,17 @@ mod tests {
         header.extras_length = 4;
         header.key_length = 5;
         header.total_body_length = 19; // 4 + 5 + 10 value
-        assert_eq!(header.value_length(), 10);
+        assert_eq!(header.value_length(), Some(10));
     }
 
     #[test]
-    fn response_checked_value_length_rejects_malformed_lengths() {
+    fn response_value_length_rejects_malformed_lengths() {
         let mut header = ResponseHeader::new(Opcode::Get, Status::NoError);
         header.extras_length = 4;
         header.key_length = 1;
         header.total_body_length = 0;
 
-        assert_eq!(header.checked_value_length(), None);
-    }
-
-    #[test]
-    #[should_panic(expected = "invalid binary response header lengths")]
-    fn response_legacy_value_length_preserves_malformed_header_panic() {
-        let mut header = ResponseHeader::new(Opcode::Get, Status::NoError);
-        header.extras_length = 4;
-        header.key_length = 1;
-        header.total_body_length = 0;
-
-        let _ = header.value_length();
+        assert_eq!(header.value_length(), None);
     }
 
     #[test]

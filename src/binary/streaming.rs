@@ -128,7 +128,7 @@ pub fn parse_streaming(
 
     // Validate the scalar body lengths before deciding whether more bytes are needed.
     let value_len = header
-        .checked_value_length()
+        .value_length()
         .ok_or(ParseError::Protocol("header lengths exceed body length"))?;
 
     let total_len = header
