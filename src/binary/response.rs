@@ -272,18 +272,18 @@ impl<'a> ParsedBinaryResponse<'a> {
     pub fn parse(data: &'a [u8]) -> Result<(Self, usize), crate::error::ParseError> {
         let header = ResponseHeader::parse(data)?;
 
-        let total_len = HEADER_SIZE + header.total_body_length as usize;
+        // Validate scalar body lengths before deciding whether more bytes are needed.
+        header
+            .value_length()
+            .ok_or(crate::error::ParseError::Protocol(
+                "header lengths exceed body length",
+            ))?;
+
+        let total_len = header
+            .packet_length()
+            .ok_or(crate::error::ParseError::Protocol("packet length overflow"))?;
         if data.len() < total_len {
             return Err(crate::error::ParseError::Incomplete);
-        }
-
-        // Validate that header lengths are consistent with total body length
-        let extras_len = header.extras_length as usize;
-        let key_len = header.key_length as usize;
-        if extras_len + key_len > header.total_body_length as usize {
-            return Err(crate::error::ParseError::Protocol(
-                "header lengths exceed body length",
-            ));
         }
 
         let body = &data[HEADER_SIZE..total_len];
@@ -756,14 +756,14 @@ mod tests {
     #[test]
     fn test_parse_header_lengths_exceed_body() {
         let mut buf = [0u8; 256];
-        BinaryResponse::encode_get(&mut buf, Opcode::Get, 42, 123, 0, b"hello");
+        let len = BinaryResponse::encode_get(&mut buf, Opcode::Get, 42, 123, 0, b"hello");
 
         // Set key_length larger than total_body_length
         buf[2] = 0xFF;
         buf[3] = 0xFF;
 
         assert!(matches!(
-            ParsedBinaryResponse::parse(&buf),
+            ParsedBinaryResponse::parse(&buf[..len]),
             Err(crate::error::ParseError::Protocol(
                 "header lengths exceed body length"
             ))

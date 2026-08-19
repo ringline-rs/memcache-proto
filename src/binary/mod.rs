@@ -43,6 +43,8 @@ mod header;
 mod request;
 mod response;
 mod streaming;
+#[cfg(kani)]
+mod verification;
 
 pub use command::BinaryCommand;
 pub use header::{

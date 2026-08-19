@@ -312,9 +312,13 @@ impl RequestHeader {
         HEADER_SIZE
     }
 
-    /// Calculate the value length from the header fields.
-    pub fn value_length(&self) -> usize {
-        self.total_body_length as usize - self.extras_length as usize - self.key_length as usize
+    /// Calculate the value length, returning `None` for inconsistent fields.
+    pub fn value_length(&self) -> Option<usize> {
+        checked_value_length(self.total_body_length, self.extras_length, self.key_length)
+    }
+
+    pub(crate) fn packet_length(&self) -> Option<usize> {
+        checked_packet_length(self.total_body_length)
     }
 }
 
@@ -404,10 +408,29 @@ impl ResponseHeader {
         HEADER_SIZE
     }
 
-    /// Calculate the value length from the header fields.
-    pub fn value_length(&self) -> usize {
-        self.total_body_length as usize - self.extras_length as usize - self.key_length as usize
+    /// Calculate the value length, returning `None` for inconsistent fields.
+    pub fn value_length(&self) -> Option<usize> {
+        checked_value_length(self.total_body_length, self.extras_length, self.key_length)
     }
+
+    pub(crate) fn packet_length(&self) -> Option<usize> {
+        checked_packet_length(self.total_body_length)
+    }
+}
+
+fn checked_value_length(
+    total_body_length: u32,
+    extras_length: u8,
+    key_length: u16,
+) -> Option<usize> {
+    usize::try_from(total_body_length)
+        .ok()?
+        .checked_sub(usize::from(extras_length))?
+        .checked_sub(usize::from(key_length))
+}
+
+fn checked_packet_length(total_body_length: u32) -> Option<usize> {
+    HEADER_SIZE.checked_add(usize::try_from(total_body_length).ok()?)
 }
 
 #[cfg(test)]
@@ -483,7 +506,17 @@ mod tests {
         header.extras_length = 8;
         header.key_length = 10;
         header.total_body_length = 28; // 8 + 10 + 10 value
-        assert_eq!(header.value_length(), 10);
+        assert_eq!(header.value_length(), Some(10));
+    }
+
+    #[test]
+    fn request_value_length_rejects_malformed_lengths() {
+        let mut header = RequestHeader::new(Opcode::Set);
+        header.extras_length = 8;
+        header.key_length = 1;
+        header.total_body_length = 0;
+
+        assert_eq!(header.value_length(), None);
     }
 
     // Additional tests for improved coverage
@@ -695,7 +728,17 @@ mod tests {
         header.extras_length = 4;
         header.key_length = 5;
         header.total_body_length = 19; // 4 + 5 + 10 value
-        assert_eq!(header.value_length(), 10);
+        assert_eq!(header.value_length(), Some(10));
+    }
+
+    #[test]
+    fn response_value_length_rejects_malformed_lengths() {
+        let mut header = ResponseHeader::new(Opcode::Get, Status::NoError);
+        header.extras_length = 4;
+        header.key_length = 1;
+        header.total_body_length = 0;
+
+        assert_eq!(header.value_length(), None);
     }
 
     #[test]
