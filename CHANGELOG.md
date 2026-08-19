@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-08-19
+
 ### Fixed
 
 - `ParseOptions::max_line_len` saturates instead of overflowing. `max_key_len`
