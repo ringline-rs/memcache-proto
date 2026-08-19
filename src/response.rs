@@ -430,13 +430,7 @@ impl Response {
 
 /// Find \r\n in data, return position of \r
 fn find_crlf(data: &[u8]) -> Option<usize> {
-    memchr::memchr(b'\r', data).and_then(|pos| {
-        if pos + 1 < data.len() && data[pos + 1] == b'\n' {
-            Some(pos)
-        } else {
-            None
-        }
-    })
+    memchr::memchr(b'\r', data).filter(|&pos| pos + 1 < data.len() && data[pos + 1] == b'\n')
 }
 
 /// Parse a VALUE response (potentially with multiple values).
