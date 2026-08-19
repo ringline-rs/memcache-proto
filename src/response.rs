@@ -165,10 +165,25 @@ impl Response {
     /// Parse a response from a byte buffer.
     ///
     /// Returns the parsed response and the number of bytes consumed.
+    ///
+    /// Uses [`DEFAULT_MAX_RESPONSE_LINE_LEN`] as the line-length bound. A
+    /// buffer that grows past it without producing a CRLF is rejected with
+    /// `Protocol("line too long")` rather than reported as `Incomplete`
+    /// forever. Use [`Self::parse_with_max_line_len`] to change the bound.
     #[inline]
     pub fn parse(data: &[u8]) -> Result<(Self, usize), ParseError> {
+        Self::parse_with_max_line_len(data, DEFAULT_MAX_RESPONSE_LINE_LEN)
+    }
+
+    /// Parse a response with an explicit maximum line length.
+    ///
+    /// See [`Self::parse`] for the default.
+    pub fn parse_with_max_line_len(
+        data: &[u8],
+        max_line_len: usize,
+    ) -> Result<(Self, usize), ParseError> {
         // Find the first line
-        let line_end = find_crlf(data).ok_or(ParseError::Incomplete)?;
+        let line_end = find_crlf(data, max_line_len)?.ok_or(ParseError::Incomplete)?;
         let line = &data[..line_end];
 
         // Check for simple responses first
@@ -212,7 +227,7 @@ impl Response {
 
         // Check for VALUE response
         if line.starts_with(b"VALUE ") {
-            return parse_value_response(data);
+            return parse_value_response(data, max_line_len);
         }
 
         // Check for numeric response (INCR/DECR returns `<number>\r\n`)
@@ -433,19 +448,37 @@ impl Response {
 /// A bare `\r` not followed by `\n` is ordinary line content, so the scan
 /// continues past it; only a real CRLF terminates a line. Returns `None` when
 /// no CRLF is present yet, which callers treat as "need more data".
-fn find_crlf(data: &[u8]) -> Option<usize> {
-    memchr::memmem::find(data, b"\r\n")
+fn find_crlf(data: &[u8], max_line_len: usize) -> Result<Option<usize>, ParseError> {
+    if let Some(pos) = memchr::memmem::find(data, b"\r\n") {
+        return Ok(Some(pos));
+    }
+
+    // No CRLF found - check if we've exceeded the line length limit
+    if data.len() > max_line_len {
+        return Err(ParseError::Protocol("line too long"));
+    }
+
+    Ok(None)
 }
 
+/// Default maximum length of a single ASCII response line, in bytes.
+///
+/// The longest legitimate response line is a VALUE header --
+/// `VALUE <key> <flags> <bytes> [<cas>]` -- which is bounded by the 250-byte
+/// key limit at roughly 310 bytes. This default leaves generous headroom for
+/// long `SERVER_ERROR` text while still bounding how much a peer can make a
+/// caller buffer before the line is rejected.
+pub const DEFAULT_MAX_RESPONSE_LINE_LEN: usize = 8192;
+
 /// Parse a VALUE response (potentially with multiple values).
-fn parse_value_response(data: &[u8]) -> Result<(Response, usize), ParseError> {
+fn parse_value_response(data: &[u8], max_line_len: usize) -> Result<(Response, usize), ParseError> {
     let mut values = Vec::new();
     let mut pos = 0;
 
     loop {
         // Find the line end
         let remaining = &data[pos..];
-        let line_end = find_crlf(remaining).ok_or(ParseError::Incomplete)?;
+        let line_end = find_crlf(remaining, max_line_len)?.ok_or(ParseError::Incomplete)?;
         let line = &remaining[..line_end];
 
         // Check for END
@@ -574,9 +607,20 @@ impl ResponseBytes {
     ///
     /// Same parsing logic as [`Response::parse`] but returns `Bytes::slice()`
     /// references into the input buffer instead of copying into `Vec<u8>`.
+    ///
+    /// Uses [`DEFAULT_MAX_RESPONSE_LINE_LEN`] as the line-length bound; see
+    /// [`Self::parse_with_max_line_len`] to change it.
     #[inline]
     pub fn parse(data: Bytes) -> Result<(Self, usize), ParseError> {
-        let line_end = find_crlf(&data).ok_or(ParseError::Incomplete)?;
+        Self::parse_with_max_line_len(data, DEFAULT_MAX_RESPONSE_LINE_LEN)
+    }
+
+    /// Parse a response from a `Bytes` buffer with an explicit maximum line length.
+    pub fn parse_with_max_line_len(
+        data: Bytes,
+        max_line_len: usize,
+    ) -> Result<(Self, usize), ParseError> {
+        let line_end = find_crlf(&data, max_line_len)?.ok_or(ParseError::Incomplete)?;
         let line = &data[..line_end];
 
         if line == b"STORED" {
@@ -617,7 +661,7 @@ impl ResponseBytes {
         }
 
         if line.starts_with(b"VALUE ") {
-            return parse_value_response_bytes(&data);
+            return parse_value_response_bytes(&data, max_line_len);
         }
 
         if !line.is_empty() && line.iter().all(|&b| b.is_ascii_digit()) {
@@ -630,13 +674,16 @@ impl ResponseBytes {
 }
 
 /// Parse a VALUE response producing zero-copy `ValueBytes` with `Bytes::slice()`.
-fn parse_value_response_bytes(data: &Bytes) -> Result<(ResponseBytes, usize), ParseError> {
+fn parse_value_response_bytes(
+    data: &Bytes,
+    max_line_len: usize,
+) -> Result<(ResponseBytes, usize), ParseError> {
     let mut values = Vec::new();
     let mut pos = 0;
 
     loop {
         let remaining = &data[pos..];
-        let line_end = find_crlf(remaining).ok_or(ParseError::Incomplete)?;
+        let line_end = find_crlf(remaining, max_line_len)?.ok_or(ParseError::Incomplete)?;
         let line = &remaining[..line_end];
 
         if line == b"END" {
@@ -1332,14 +1379,79 @@ mod tests {
 
     #[test]
     fn find_crlf_skips_bare_cr() {
+        const MAX: usize = DEFAULT_MAX_RESPONSE_LINE_LEN;
         // A bare \r is line content, not a terminator: keep scanning.
-        assert_eq!(find_crlf(b"a\rb\r\n"), Some(3));
-        assert_eq!(find_crlf(b"\r\n"), Some(0));
-        assert_eq!(find_crlf(b"\r\r\n"), Some(1));
+        assert_eq!(find_crlf(b"a\rb\r\n", MAX), Ok(Some(3)));
+        assert_eq!(find_crlf(b"\r\n", MAX), Ok(Some(0)));
+        assert_eq!(find_crlf(b"\r\r\n", MAX), Ok(Some(1)));
         // No CRLF yet -- caller needs more data.
-        assert_eq!(find_crlf(b"a\rb"), None);
-        assert_eq!(find_crlf(b"abc"), None);
-        assert_eq!(find_crlf(b""), None);
+        assert_eq!(find_crlf(b"a\rb", MAX), Ok(None));
+        assert_eq!(find_crlf(b"abc", MAX), Ok(None));
+        assert_eq!(find_crlf(b"", MAX), Ok(None));
+    }
+
+    #[test]
+    fn unterminated_line_is_bounded() {
+        // Without a bound this reported Incomplete forever, so a peer that
+        // never sends a newline could make the caller buffer without limit.
+        let flood = vec![b'x'; DEFAULT_MAX_RESPONSE_LINE_LEN + 1];
+        assert!(matches!(
+            Response::parse(&flood),
+            Err(ParseError::Protocol("line too long"))
+        ));
+        assert!(matches!(
+            ResponseBytes::parse(Bytes::from(flood.clone())),
+            Err(ParseError::Protocol("line too long"))
+        ));
+
+        // At or below the bound it is still just "need more data".
+        let ok = vec![b'x'; DEFAULT_MAX_RESPONSE_LINE_LEN];
+        assert!(matches!(Response::parse(&ok), Err(ParseError::Incomplete)));
+
+        // The bound is configurable.
+        assert!(matches!(
+            Response::parse_with_max_line_len(b"xxxxxxxx", 4),
+            Err(ParseError::Protocol("line too long"))
+        ));
+    }
+
+    #[test]
+    fn large_values_are_not_mistaken_for_long_lines() {
+        // The bound applies to a LINE, not to value data. A value far larger
+        // than the line bound must still parse: the VALUE header's CRLF is
+        // found immediately, and the payload is consumed by declared length.
+        let big = vec![b'v'; DEFAULT_MAX_RESPONSE_LINE_LEN * 8];
+        let mut data = format!("VALUE k 0 {}\r\n", big.len()).into_bytes();
+        data.extend_from_slice(&big);
+        data.extend_from_slice(b"\r\nEND\r\n");
+
+        let (resp, consumed) = Response::parse(&data).expect("large value must parse");
+        assert_eq!(consumed, data.len());
+        match resp {
+            Response::Values(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].data.len(), big.len());
+            }
+            other => panic!("expected Values, got {other:?}"),
+        }
+
+        // Same on the zero-copy path.
+        let (rb, consumed) =
+            ResponseBytes::parse(Bytes::from(data.clone())).expect("large value must parse");
+        assert_eq!(consumed, data.len());
+        assert!(matches!(rb, ResponseBytes::Values(ref v) if v[0].data.len() == big.len()));
+    }
+
+    #[test]
+    fn value_loop_is_bounded_too() {
+        // A well-formed first line followed by an unterminated flood must not
+        // string the caller along inside the VALUE loop either.
+        let mut data = b"VALUE k 0 5\r\nhello\r\n".to_vec();
+        data.extend(std::iter::repeat_n(b'x', DEFAULT_MAX_RESPONSE_LINE_LEN + 1));
+        assert!(matches!(
+            Response::parse(&data),
+            Err(ParseError::Protocol("line too long"))
+        ));
     }
 
     #[test]
