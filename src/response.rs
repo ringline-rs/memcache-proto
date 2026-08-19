@@ -428,9 +428,13 @@ impl Response {
     }
 }
 
-/// Find \r\n in data, return position of \r
+/// Find the first `\r\n` in `data`, returning the position of the `\r`.
+///
+/// A bare `\r` not followed by `\n` is ordinary line content, so the scan
+/// continues past it; only a real CRLF terminates a line. Returns `None` when
+/// no CRLF is present yet, which callers treat as "need more data".
 fn find_crlf(data: &[u8]) -> Option<usize> {
-    memchr::memchr(b'\r', data).filter(|&pos| pos + 1 < data.len() && data[pos + 1] == b'\n')
+    memchr::memmem::find(data, b"\r\n")
 }
 
 /// Parse a VALUE response (potentially with multiple values).
@@ -1324,6 +1328,28 @@ mod tests {
     fn test_find_crlf_edge_cases() {
         // \r at end without \n
         assert!(Response::parse(b"STORED\r").is_err());
+    }
+
+    #[test]
+    fn find_crlf_skips_bare_cr() {
+        // A bare \r is line content, not a terminator: keep scanning.
+        assert_eq!(find_crlf(b"a\rb\r\n"), Some(3));
+        assert_eq!(find_crlf(b"\r\n"), Some(0));
+        assert_eq!(find_crlf(b"\r\r\n"), Some(1));
+        // No CRLF yet -- caller needs more data.
+        assert_eq!(find_crlf(b"a\rb"), None);
+        assert_eq!(find_crlf(b"abc"), None);
+        assert_eq!(find_crlf(b""), None);
+    }
+
+    #[test]
+    fn bare_cr_in_line_does_not_stall_parser() {
+        // Regression: the line is complete and CRLF-terminated, so the parser
+        // must not report Incomplete and ask for bytes that cannot help.
+        let data = b"SERVER_ERROR out\rof memory\r\n";
+        let (resp, consumed) = Response::parse(data).expect("complete line must parse");
+        assert_eq!(consumed, data.len());
+        assert!(matches!(resp, Response::ServerError(ref m) if m == b"out\rof memory"));
     }
 
     #[test]
