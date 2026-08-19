@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ParseOptions::max_line_len` saturates instead of overflowing. `max_key_len`
+  and `max_keys` are public fields, so their product can exceed `usize`. The
+  unchecked form panicked in debug builds and wrapped in release ones, which
+  inverted the limit: `max_key_len = usize::MAX` produced a bound of 4, causing
+  the command parser to reject almost every line as `Protocol("line too long")`.
+
 ## [0.0.4] - 2026-08-19
 
 ### Added

@@ -70,9 +70,17 @@ impl ParseOptions {
     ///
     /// The longest line is a multi-GET with max_keys keys of max_key_len each:
     /// `get <key1> <key2> ... <keyN>\r\n`
+    /// Saturates rather than wrapping. `max_key_len` and `max_keys` are public
+    /// fields, so a caller can set values whose product exceeds `usize`. The
+    /// previous unchecked form panicked in debug builds and wrapped in release
+    /// ones, which inverted the limit: `max_key_len = usize::MAX` produced a
+    /// bound of 4, rejecting almost every command as "line too long".
     pub const fn max_line_len(&self) -> usize {
         // "get " + (key + space) * max_keys
-        4 + (self.max_key_len + 1) * self.max_keys
+        self.max_key_len
+            .saturating_add(1)
+            .saturating_mul(self.max_keys)
+            .saturating_add(4)
     }
 }
 
@@ -1027,6 +1035,78 @@ mod tests {
         let (cmd, consumed) = Command::parse(b"get my\rkey\r\n").expect("complete line parses");
         assert_eq!(consumed, 12);
         assert!(matches!(cmd, Command::Get { key } if key == b"my\rkey"));
+    }
+
+    #[test]
+    fn max_line_len_saturates_instead_of_wrapping() {
+        // Default is unchanged.
+        assert_eq!(ParseOptions::default().max_line_len(), 4 + 251 * 1024);
+
+        // Raising a limit must never produce a smaller bound. Before this was
+        // saturating, usize::MAX wrapped to 4 in release builds.
+        assert_eq!(
+            ParseOptions::new().max_key_len(usize::MAX).max_line_len(),
+            usize::MAX
+        );
+        assert_eq!(
+            ParseOptions::new()
+                .max_key_len(1 << 32)
+                .max_keys(1 << 32)
+                .max_line_len(),
+            usize::MAX
+        );
+
+        // Saturation on one axis does not swallow a zero on the other.
+        assert_eq!(
+            ParseOptions::new()
+                .max_key_len(usize::MAX)
+                .max_keys(0)
+                .max_line_len(),
+            4
+        );
+    }
+
+    #[test]
+    fn max_line_len_is_monotonic() {
+        // The property the wrapping form violated: raising either limit must
+        // never shrink the derived bound. Checked exhaustively over the
+        // boundary values, which is where wrapping actually bit -- usize::MAX
+        // used to yield 4.
+        const INTERESTING: [usize; 9] = [
+            0,
+            1,
+            2,
+            250,
+            1024,
+            1 << 32,
+            usize::MAX / 2,
+            usize::MAX - 1,
+            usize::MAX,
+        ];
+
+        for &keys in &INTERESTING {
+            for w in INTERESTING.windows(2) {
+                let (smaller, larger) = (w[0], w[1]);
+                let a = ParseOptions::new().max_key_len(smaller).max_keys(keys);
+                let b = ParseOptions::new().max_key_len(larger).max_keys(keys);
+                assert!(
+                    a.max_line_len() <= b.max_line_len(),
+                    "key_len {smaller} -> {larger} at keys={keys} shrank the bound"
+                );
+            }
+        }
+
+        for &key_len in &INTERESTING {
+            for w in INTERESTING.windows(2) {
+                let (smaller, larger) = (w[0], w[1]);
+                let a = ParseOptions::new().max_key_len(key_len).max_keys(smaller);
+                let b = ParseOptions::new().max_key_len(key_len).max_keys(larger);
+                assert!(
+                    a.max_line_len() <= b.max_line_len(),
+                    "keys {smaller} -> {larger} at key_len={key_len} shrank the bound"
+                );
+            }
+        }
     }
 
     #[test]
