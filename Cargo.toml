@@ -1,6 +1,6 @@
 [package]
 name = "memcache-proto"
-version = "0.0.6"
+version = "0.0.7"
 edition = "2024"
 # Edition 2024 requires 1.85.
 rust-version = "1.85"
